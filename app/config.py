@@ -15,6 +15,19 @@ from dotenv import load_dotenv
 _ENV_PATH = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH)
 
+# ── Streamlit secrets bridge ─────────────────────────────────────────────────
+# When running inside Streamlit, inject secrets into os.environ so that
+# libraries like LlamaIndex and the Gemini SDK pick them up automatically.
+try:
+    import streamlit as st
+
+    if hasattr(st, "secrets"):
+        for _key in ("GOOGLE_API_KEY", "LLAMA_CLOUD_API_KEY", "NEON_DATABASE_URL"):
+            if _key in st.secrets:
+                os.environ.setdefault(_key, st.secrets[_key])
+except ImportError:
+    pass  # streamlit not installed — running outside Streamlit is fine
+
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
 GOOGLE_API_KEY: str = os.environ.get("GOOGLE_API_KEY", "")

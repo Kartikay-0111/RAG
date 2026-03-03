@@ -28,6 +28,7 @@ ENV/
 .env
 .env.local
 .env.*.local
+.streamlit/secrets.toml
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 .pytest_cache/
