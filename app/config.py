@@ -1,10 +1,14 @@
 """
-config.py - Central configuration for the RAG system.
+config.py — Central configuration for the LlamaIndex RAG system.
+
 All settings loaded from environment variables (.env file).
+Provides helper functions for connection-string derivation and validation.
 """
 
+import hashlib
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load .env from project root (one level above /app)
@@ -15,25 +19,53 @@ load_dotenv(dotenv_path=_ENV_PATH)
 # ── API Keys ──────────────────────────────────────────────────────────────────
 GOOGLE_API_KEY: str = os.environ.get("GOOGLE_API_KEY", "")
 NEON_DATABASE_URL: str = os.environ.get("NEON_DATABASE_URL", "")
+LLAMA_CLOUD_API_KEY: str = os.environ.get("LLAMA_CLOUD_API_KEY", "")
 
 # ── Gemini model names ────────────────────────────────────────────────────────
-GEMINI_LLM_MODEL: str = "gemini-2.5-flash-lite"
-GEMINI_EMBEDDING_MODEL: str = "gemini-embedding-001"
-EMBEDDING_DIMENSION: int = 768  # truncated from 3072 via output_dimensionality
+GEMINI_LLM_MODEL: str = "gemini-2.5-flash"
+GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
+EMBEDDING_DIMENSION: int = 3072
 
 # ── LLM generation settings ───────────────────────────────────────────────────
 LLM_TEMPERATURE: float = 0.1
-LLM_TOP_P: float = 0.8
-
-# ── Chunking settings ────────────────────────────────────────────────────────
-CHUNK_SIZE: int = 500        # characters
-CHUNK_OVERLAP: int = 100     # characters
 
 # ── Retrieval settings ────────────────────────────────────────────────────────
-TOP_K_CHUNKS: int = 5        # number of chunks to retrieve per query
+TOP_K_CHUNKS: int = 5
+
+# ── Vector store table name ───────────────────────────────────────────────────
+VECTOR_TABLE_NAME: str = "document_chunks_llama"
+HASH_TABLE_NAME: str = "ingested_document_hashes"
+
+
+# ── Connection helpers ────────────────────────────────────────────────────────
+
+def get_async_connection_string() -> str:
+    """
+    Derive an asyncpg connection URL from NEON_DATABASE_URL.
+
+    PGVectorStore needs *both* a sync (psycopg2) and an async (asyncpg)
+    connection string.  Neon typically provides ``postgresql://…``, which
+    works as-is for psycopg2 but must be prefixed for asyncpg.
+    """
+    url = NEON_DATABASE_URL
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return url
+
+
+def compute_file_hash(file_path: str | Path) -> str:
+    """Return the SHA-256 hex digest of a file (for dedup checks)."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
+
 def validate_config() -> None:
     """Raise an error if required environment variables are missing."""
     missing = []
@@ -41,6 +73,8 @@ def validate_config() -> None:
         missing.append("GOOGLE_API_KEY")
     if not NEON_DATABASE_URL:
         missing.append("NEON_DATABASE_URL")
+    if not LLAMA_CLOUD_API_KEY:
+        missing.append("LLAMA_CLOUD_API_KEY")
     if missing:
         raise EnvironmentError(
             f"Missing required environment variables: {', '.join(missing)}.\n"

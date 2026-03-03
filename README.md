@@ -1,28 +1,25 @@
-# 🍊 Swiggy Annual Report — AI Document Intelligence (RAG)
+# 📄 Document AI Q&A — RAG System
 
-A **production-ready Retrieval-Augmented Generation (RAG)** system that answers natural language questions about the Swiggy Annual Report, strictly grounded in document content. No hallucinations.
+A **production-ready Retrieval-Augmented Generation (RAG)** system that answers natural language questions about uploaded PDF documents, strictly grounded in document content. No hallucinations.
 
----
-
-## 📄 Document Source
-
-**Swiggy Annual Report FY 2023–24**
-Source: [https://investors.swiggy.com/annual-reports](https://investors.swiggy.com/annual-reports)
-File used: `Annual-Report-FY-2023-24.pdf`
+Built with **LlamaIndex**, **LlamaParse**, **Gemini**, and **Neon PostgreSQL (pgvector)**.
 
 ---
 
 ## 🏗 Architecture
 
 ```
-PDF Upload → pdf2image → Tesseract OCR → Text Cleaner
-→ Chunker (500 chars, 100 overlap)
-→ Gemini Embeddings (768-dim) → Neon pgvector DB
-─────────────────────────────────────────────────
+PDF Upload → LlamaParse (Cloud Markdown extraction)
+→ Metadata tagging (document_name injected per chunk)
+→ SentenceSplitter (512 tokens, 64 overlap)
+→ Gemini Embeddings (3072-dim) → Neon pgvector DB
+─────────────────────────────────────────────────────
 User Question → Gemini Embeddings → Cosine Search
 → Top-5 Chunks → Strict Grounded Prompt
-→ Gemini 1.5 Flash (temp=0.1) → Answer + Page Citations
+→ Gemini 2.5 Flash Lite (temp=0.1) → Answer + Page Citations
 ```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed component diagram.
 
 ---
 
@@ -30,13 +27,12 @@ User Question → Gemini Embeddings → Cosine Search
 
 ### Prerequisites
 
-```bash
-# Ubuntu/Debian
-sudo apt-get install tesseract-ocr poppler-utils
+- Python 3.11+
+- A [Google AI Studio](https://aistudio.google.com/app/apikey) API key
+- A [Neon.tech](https://neon.tech) PostgreSQL database (free tier works)
+- A [LlamaCloud](https://cloud.llamaindex.ai) API key (for LlamaParse)
 
-# macOS
-brew install tesseract poppler
-```
+> **Note:** No local OCR tools needed — LlamaParse handles PDF parsing in the cloud.
 
 ### 1. Install dependencies
 
@@ -50,13 +46,14 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Fill in GOOGLE_API_KEY and NEON_DATABASE_URL
+# Fill in all three API keys
 ```
 
 | Variable | Source |
 |---|---|
 | `GOOGLE_API_KEY` | [Google AI Studio](https://aistudio.google.com/app/apikey) |
 | `NEON_DATABASE_URL` | [Neon.tech](https://neon.tech) — free PostgreSQL + pgvector |
+| `LLAMA_CLOUD_API_KEY` | [LlamaCloud](https://cloud.llamaindex.ai) — for LlamaParse |
 
 ### 3. Run
 
@@ -68,17 +65,29 @@ Open [http://localhost:8501](http://localhost:8501)
 
 ### 4. Use the App
 
-1. Upload `Annual-Report-FY-2023-24.pdf` in the sidebar
-2. Click **"Process Document"** — OCR + embedding (~10–20 min for full PDF)
-3. Ask questions — e.g. *"What was Swiggy's total revenue in FY2024?"*
+1. Upload any PDF document in the sidebar
+2. Click **"Process Document"** — LlamaParse extracts tables + text as Markdown
+3. Ask questions — e.g. *"What was the total revenue in FY2024?"*
+4. Upload additional documents — they are added to the same index with metadata tagging
+
+---
+
+## 📚 Multi-Document Support
+
+All documents share the same pgvector table (`document_chunks_llama`). Each chunk
+is tagged with a `document_name` in its metadata during ingestion, so:
+
+- Source chunks display which document they came from
+- The LLM is instructed to mention the source document when relevant
+- Duplicate uploads (same file hash) are rejected automatically
 
 ---
 
 ## 🐳 Docker
 
 ```bash
-docker build -t swiggy-rag .
-docker run -p 8501:8501 --env-file .env swiggy-rag
+docker build -t doc-rag .
+docker run -p 8501:8501 --env-file .env doc-rag
 ```
 
 ---
@@ -89,7 +98,7 @@ docker run -p 8501:8501 --env-file .env swiggy-rag
 pytest tests/ -v
 ```
 
-All 24 tests run fully offline (APIs mocked).
+All tests run fully offline (external APIs mocked).
 
 ---
 
@@ -98,11 +107,12 @@ All 24 tests run fully offline (APIs mocked).
 | Technique | Setting |
 |---|---|
 | Low temperature | `0.1` |
-| Restricted top-p | `0.8` |
 | Strict system prompt | Answer ONLY from context |
 | Refusal instruction | Say "not available" if absent |
 | Citation enforcement | Always cite page numbers |
+| Table fidelity | LlamaParse preserves Markdown tables |
 | Limited context | Top-5 chunks only |
+| Document source | Prompt mentions document_name metadata |
 
 ---
 
@@ -111,24 +121,19 @@ All 24 tests run fully offline (APIs mocked).
 ```
 ai-doc-rag/
 ├── app/
-│   ├── main.py              # Streamlit UI
-│   ├── config.py            # Config + env vars
-│   ├── ingestion/
-│   │   ├── pdf_loader.py    # PDF → images
-│   │   ├── ocr_engine.py    # Tesseract OCR
-│   │   ├── cleaner.py       # Text cleaning
-│   │   ├── chunker.py       # Chunking with metadata
-│   │   └── embedder.py      # Gemini Embeddings
-│   ├── retrieval/
-│   │   ├── vector_store.py  # Neon + pgvector
-│   │   ├── similarity_search.py
-│   │   └── prompt_builder.py
+│   ├── main.py                  # Streamlit UI (chat + upload + multi-doc)
+│   ├── config.py                # Config, env vars, URL helpers
 │   ├── llm/
-│   │   └── gemini_client.py
-│   └── utils/logger.py
+│   │   └── __init__.py          # Centralized LlamaIndex Settings
+│   ├── ingestion/
+│   │   └── pipeline.py          # LlamaParse → tag → chunk → embed → Neon
+│   ├── retrieval/
+│   │   └── query_engine.py      # Load index → QueryEngine + strict prompt
+│   └── utils/
+│       └── logger.py            # Structured logging
 ├── tests/
-│   ├── test_ingestion.py
-│   └── test_retrieval.py
+│   ├── test_ingestion.py        # Ingestion pipeline + metadata tests
+│   └── test_retrieval.py        # Query engine + prompt tests
 ├── Dockerfile
 ├── requirements.txt
 ├── .env.example
@@ -142,9 +147,11 @@ ai-doc-rag/
 
 | Layer | Technology |
 |---|---|
-| OCR | Tesseract + pdf2image |
-| Embeddings | Gemini `embedding-001` (768-dim) |
-| Vector DB | Neon PostgreSQL + pgvector |
-| LLM | Gemini 1.5 Flash |
+| PDF Parsing | LlamaParse (cloud) via `llama-index-readers-llama-parse` |
+| Chunking | LlamaIndex SentenceSplitter (512 tokens / 64 overlap) |
+| Embeddings | GeminiEmbedding `gemini-embedding-001` (3072-dim) via `llama-index-embeddings-google` |
+| Vector DB | Neon PostgreSQL + pgvector via `llama-index-vector-stores-postgres` |
+| LLM | GoogleGenAI `gemini-2.5-flash-lite` (temp=0.1) via `llama-index-llms-google-genai` |
+| Framework | LlamaIndex Core |
 | UI | Streamlit |
 | Deployment | Docker |

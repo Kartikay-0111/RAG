@@ -1,158 +1,269 @@
 """
-test_ingestion.py - Unit tests for the ingestion pipeline modules.
-External APIs (Gemini) are mocked so tests run fully offline.
+test_ingestion.py — Unit tests for the LlamaIndex ingestion pipeline.
+LlamaParse and VectorStoreIndex are fully mocked — no external API calls.
 """
 
 import pytest
 from unittest.mock import patch, MagicMock
 
-# ── cleaner tests ─────────────────────────────────────────────────────────────
 
-from app.ingestion.cleaner import clean_text, clean_pages
+class TestParsePdf:
 
+    @patch("app.ingestion.pipeline.LlamaParse")
+    def test_returns_list_of_documents(self, MockLlamaParse):
+        """parse_pdf should return a list of LlamaIndex Document objects."""
+        from app.ingestion.pipeline import parse_pdf
 
-class TestCleanText:
+        mock_doc1 = MagicMock()
+        mock_doc1.text = "# Revenue\n| Year | Amount |\n|---|---------|\n| FY24 | 12000 |"
+        mock_doc2 = MagicMock()
+        mock_doc2.text = "## Highlights\nGMV grew by 25%."
 
-    def test_removes_extra_whitespace(self):
-        raw = "Hello    World   foo"
-        assert "  " not in clean_text(raw)
+        mock_instance = MockLlamaParse.return_value
+        mock_instance.load_data.return_value = [mock_doc1, mock_doc2]
 
-    def test_preserves_numbers_and_currency(self):
-        raw = "Revenue: ₹12,345.67 crores  (FY2024)"
-        cleaned = clean_text(raw)
-        assert "12,345.67" in cleaned
-        assert "FY2024" in cleaned
+        docs = parse_pdf("/tmp/test.pdf")
 
-    def test_collapses_excessive_blank_lines(self):
-        raw = "Line1\n\n\n\n\nLine2"
-        cleaned = clean_text(raw)
-        assert "\n\n\n" not in cleaned
+        assert len(docs) == 2
+        mock_instance.load_data.assert_called_once_with("/tmp/test.pdf")
 
-    def test_empty_input_returns_empty(self):
-        assert clean_text("") == ""
-        assert clean_text("   \n  \t  ") == ""
+    @patch("app.ingestion.pipeline.LlamaParse")
+    def test_llamaparse_uses_markdown_result_type(self, MockLlamaParse):
+        """LlamaParse must be instantiated with result_type='markdown'."""
+        from app.ingestion.pipeline import parse_pdf
 
-    def test_unicode_dashes_normalized(self):
-        raw = "Revenue – 100"
-        cleaned = clean_text(raw)
-        assert "–" not in cleaned
-        assert "-" in cleaned
+        mock_instance = MockLlamaParse.return_value
+        mock_instance.load_data.return_value = []
 
+        parse_pdf("/tmp/report.pdf")
 
-class TestCleanPages:
+        MockLlamaParse.assert_called_once()
+        call_kwargs = MockLlamaParse.call_args.kwargs
+        assert call_kwargs.get("result_type") == "markdown", (
+            "LlamaParse must use result_type='markdown' to preserve tables."
+        )
 
-    def test_skips_empty_pages(self):
-        pages = [(1, "Hello world"), (2, "   \n  "), (3, "More text")]
-        result = clean_pages(pages)
-        page_nums = [p for p, _ in result]
-        assert 2 not in page_nums
-        assert 1 in page_nums
-        assert 3 in page_nums
+    @patch("app.ingestion.pipeline.LlamaParse")
+    def test_empty_pdf_returns_empty_list(self, MockLlamaParse):
+        """parse_pdf should gracefully return empty list for a blank PDF."""
+        from app.ingestion.pipeline import parse_pdf
 
-    def test_preserves_page_number(self):
-        pages = [(42, "Some important text here")]
-        result = clean_pages(pages)
-        assert result[0][0] == 42
+        mock_instance = MockLlamaParse.return_value
+        mock_instance.load_data.return_value = []
 
+        docs = parse_pdf("/tmp/blank.pdf")
+        assert docs == []
 
-# ── chunker tests ─────────────────────────────────────────────────────────────
+    @patch("app.ingestion.pipeline.LlamaParse")
+    def test_parse_pdf_raises_runtime_error_on_failure(self, MockLlamaParse):
+        """parse_pdf should wrap LlamaParse errors in RuntimeError."""
+        from app.ingestion.pipeline import parse_pdf
 
-from app.ingestion.chunker import chunk_pages, TextChunk
+        mock_instance = MockLlamaParse.return_value
+        mock_instance.load_data.side_effect = Exception("API timeout")
 
-
-class TestChunkPages:
-
-    def _make_page(self, n_chars: int = 1200) -> str:
-        return "A" * n_chars
-
-    def test_basic_chunking_produces_multiple_chunks(self):
-        pages = [(1, self._make_page(1200))]
-        chunks = chunk_pages(pages, document_id="test_doc", chunk_size=500, overlap=100)
-        assert len(chunks) > 1
-
-    def test_chunk_max_length_respected(self):
-        pages = [(1, self._make_page(2000))]
-        chunks = chunk_pages(pages, document_id="test_doc", chunk_size=500, overlap=100)
-        for chunk in chunks:
-            assert len(chunk.content) <= 500
-
-    def test_metadata_attached(self):
-        pages = [(7, "Some text on page seven for metadata testing purposes here")]
-        chunks = chunk_pages(pages, document_id="my_doc", chunk_size=500, overlap=100)
-        assert chunks[0].document_id == "my_doc"
-        assert chunks[0].page_number == 7
-
-    def test_overlap_means_consecutive_chunks_share_content(self):
-        text = "ABCDEFGHIJ" * 60  # 600 chars
-        pages = [(1, text)]
-        chunks = chunk_pages(pages, document_id="doc", chunk_size=100, overlap=20)
-        if len(chunks) >= 2:
-            end_of_first = chunks[0].content[-20:]
-            start_of_second = chunks[1].content[:20]
-            assert any(c in start_of_second for c in end_of_first)
-
-    def test_empty_pages_ignored(self):
-        pages = [(1, "   "), (2, "Real content here for page two")]
-        chunks = chunk_pages(pages, document_id="doc")
-        page_nums = {c.page_number for c in chunks}
-        assert 1 not in page_nums
-        assert 2 in page_nums
-
-    def test_chunk_index_monotonically_increases(self):
-        pages = [(1, "A" * 2000)]
-        chunks = chunk_pages(pages, document_id="doc", chunk_size=300, overlap=50)
-        indices = [c.chunk_index for c in chunks]
-        assert indices == list(range(len(indices)))
+        with pytest.raises(RuntimeError, match="PDF parsing failed"):
+            parse_pdf("/tmp/bad.pdf")
 
 
-# ── embedder tests (mocked) ───────────────────────────────────────────────────
+class TestTagDocuments:
 
-from app.ingestion.embedder import embed_text, embed_chunks
+    def test_injects_document_name_metadata(self):
+        """_tag_documents should add document_name to each doc's metadata."""
+        from app.ingestion.pipeline import _tag_documents
+
+        doc1 = MagicMock()
+        doc1.metadata = {"page_label": "1"}
+        doc2 = MagicMock()
+        doc2.metadata = {}
+
+        _tag_documents([doc1, doc2], "Annual-Report")
+
+        assert doc1.metadata["document_name"] == "Annual-Report"
+        assert doc2.metadata["document_name"] == "Annual-Report"
+
+    def test_handles_none_metadata(self):
+        """_tag_documents should handle docs with metadata=None."""
+        from app.ingestion.pipeline import _tag_documents
+
+        doc = MagicMock()
+        doc.metadata = None
+
+        _tag_documents([doc], "my-doc")
+
+        assert doc.metadata["document_name"] == "my-doc"
 
 
-def _make_embedding_response(values):
-    """Build a mock response matching google.genai embed_content return shape."""
-    mock_embedding = MagicMock()
-    mock_embedding.values = values
-    mock_resp = MagicMock()
-    mock_resp.embeddings = [mock_embedding]
-    return mock_resp
+class TestRunIngestionPipeline:
 
+    @patch("app.ingestion.pipeline._store_hash_in_db")
+    @patch("app.ingestion.pipeline._hash_exists_in_db", return_value=False)
+    @patch("app.ingestion.pipeline.VectorStoreIndex")
+    @patch("app.ingestion.pipeline.StorageContext")
+    @patch("app.ingestion.pipeline._get_vector_store")
+    @patch("app.ingestion.pipeline.parse_pdf")
+    @patch("app.ingestion.pipeline.configure_llama_settings")
+    @patch("app.ingestion.pipeline.compute_file_hash", return_value="abc123")
+    def test_pipeline_calls_steps_in_order(
+        self,
+        mock_hash,
+        mock_configure,
+        mock_parse,
+        mock_get_store,
+        mock_storage_ctx,
+        MockIndex,
+        mock_hash_exists,
+        mock_store_hash,
+    ):
+        """run_ingestion_pipeline must call configure -> parse -> index in order."""
+        from app.ingestion.pipeline import run_ingestion_pipeline
 
-class TestEmbedder:
+        mock_doc = MagicMock()
+        mock_doc.metadata = {}
+        mock_parse.return_value = [mock_doc]
+        mock_get_store.return_value = MagicMock()
+        mock_storage_ctx.from_defaults.return_value = MagicMock()
+        MockIndex.from_documents.return_value = MagicMock()
 
-    @patch("app.ingestion.embedder.genai.Client")
-    def test_embed_text_calls_gemini_api(self, MockClient):
-        mock_instance = MockClient.return_value
-        mock_instance.models.embed_content.return_value = _make_embedding_response([0.1] * 768)
-        result = embed_text("hello world")
-        assert len(result) == 768
-        mock_instance.models.embed_content.assert_called_once()
+        run_ingestion_pipeline("/tmp/test.pdf")
 
-    @patch("app.ingestion.embedder.genai.Client")
-    def test_embed_chunks_skips_failed(self, MockClient):
-        """A single failed embedding should not crash the whole batch."""
-        mock_instance = MockClient.return_value
-        mock_instance.models.embed_content.side_effect = [
-            _make_embedding_response([0.0] * 768),
-            Exception("API error"),
-            _make_embedding_response([0.5] * 768),
-        ]
-        chunks = [
-            TextChunk("doc", 1, 0, "chunk one text", 0),
-            TextChunk("doc", 1, 1, "chunk two text", 500),
-            TextChunk("doc", 2, 2, "chunk three text", 0),
-        ]
-        results = embed_chunks(chunks, batch_delay_sec=0)
-        assert len(results) == 2
+        mock_configure.assert_called_once()
+        mock_parse.assert_called_once()
+        MockIndex.from_documents.assert_called_once()
+        mock_store_hash.assert_called_once_with("abc123", "test")
 
-    @patch("app.ingestion.embedder.genai.Client")
-    def test_embed_chunks_returns_correct_types(self, MockClient):
-        mock_instance = MockClient.return_value
-        mock_instance.models.embed_content.return_value = _make_embedding_response([0.1] * 768)
-        chunks = [TextChunk("doc", 1, 0, "some text here", 0)]
-        results = embed_chunks(chunks, batch_delay_sec=0)
-        chunk, emb = results[0]
-        assert isinstance(chunk, TextChunk)
-        assert isinstance(emb, list)
-        assert len(emb) == 768
+    @patch("app.ingestion.pipeline._store_hash_in_db")
+    @patch("app.ingestion.pipeline._hash_exists_in_db", return_value=False)
+    @patch("app.ingestion.pipeline.VectorStoreIndex")
+    @patch("app.ingestion.pipeline.StorageContext")
+    @patch("app.ingestion.pipeline._get_vector_store")
+    @patch("app.ingestion.pipeline.parse_pdf")
+    @patch("app.ingestion.pipeline.configure_llama_settings")
+    @patch("app.ingestion.pipeline.compute_file_hash", return_value="def456")
+    def test_pipeline_passes_documents_to_index(
+        self,
+        mock_hash,
+        mock_configure,
+        mock_parse,
+        mock_get_store,
+        mock_storage_ctx,
+        MockIndex,
+        mock_hash_exists,
+        mock_store_hash,
+    ):
+        """Documents from parse_pdf must be passed to VectorStoreIndex."""
+        from app.ingestion.pipeline import run_ingestion_pipeline
+
+        mock_docs = [MagicMock(), MagicMock()]
+        for d in mock_docs:
+            d.metadata = {}
+        mock_parse.return_value = mock_docs
+        mock_get_store.return_value = MagicMock()
+        mock_storage_ctx.from_defaults.return_value = MagicMock()
+        MockIndex.from_documents.return_value = MagicMock()
+
+        run_ingestion_pipeline("/tmp/test.pdf")
+
+        call_args = MockIndex.from_documents.call_args
+        assert call_args[0][0] == mock_docs
+
+    @patch("app.ingestion.pipeline._store_hash_in_db")
+    @patch("app.ingestion.pipeline._hash_exists_in_db", return_value=False)
+    @patch("app.ingestion.pipeline.VectorStoreIndex")
+    @patch("app.ingestion.pipeline.StorageContext")
+    @patch("app.ingestion.pipeline._get_vector_store")
+    @patch("app.ingestion.pipeline.parse_pdf")
+    @patch("app.ingestion.pipeline.configure_llama_settings")
+    @patch("app.ingestion.pipeline.compute_file_hash", return_value="meta01")
+    def test_pipeline_tags_documents_with_metadata(
+        self,
+        mock_hash,
+        mock_configure,
+        mock_parse,
+        mock_get_store,
+        mock_storage_ctx,
+        MockIndex,
+        mock_hash_exists,
+        mock_store_hash,
+    ):
+        """run_ingestion_pipeline must tag every chunk with document_name metadata."""
+        from app.ingestion.pipeline import run_ingestion_pipeline
+
+        mock_doc = MagicMock()
+        mock_doc.metadata = {}
+        mock_parse.return_value = [mock_doc]
+        mock_get_store.return_value = MagicMock()
+        mock_storage_ctx.from_defaults.return_value = MagicMock()
+        MockIndex.from_documents.return_value = MagicMock()
+
+        run_ingestion_pipeline("/tmp/my-report.pdf", doc_name="my-report")
+
+        assert mock_doc.metadata["document_name"] == "my-report"
+
+    @patch("app.ingestion.pipeline._hash_exists_in_db", return_value=True)
+    @patch("app.ingestion.pipeline.parse_pdf")
+    @patch("app.ingestion.pipeline.configure_llama_settings")
+    @patch("app.ingestion.pipeline.compute_file_hash", return_value="dup789")
+    def test_pipeline_raises_on_duplicate_document(
+        self,
+        mock_hash,
+        mock_configure,
+        mock_parse,
+        mock_hash_exists,
+    ):
+        """run_ingestion_pipeline must raise ValueError for duplicate documents."""
+        from app.ingestion.pipeline import run_ingestion_pipeline
+
+        with pytest.raises(ValueError, match="already been processed"):
+            run_ingestion_pipeline("/tmp/duplicate.pdf")
+
+    @patch("app.ingestion.pipeline._hash_exists_in_db", return_value=False)
+    @patch("app.ingestion.pipeline.parse_pdf", return_value=[])
+    @patch("app.ingestion.pipeline.configure_llama_settings")
+    @patch("app.ingestion.pipeline.compute_file_hash", return_value="empty000")
+    def test_pipeline_raises_on_empty_parse(
+        self,
+        mock_hash,
+        mock_configure,
+        mock_parse,
+        mock_hash_exists,
+    ):
+        """run_ingestion_pipeline must raise RuntimeError if parse returns nothing."""
+        from app.ingestion.pipeline import run_ingestion_pipeline
+
+        with pytest.raises(RuntimeError, match="no extractable content"):
+            run_ingestion_pipeline("/tmp/empty.pdf")
+
+    @patch("app.ingestion.pipeline._store_hash_in_db")
+    @patch("app.ingestion.pipeline._hash_exists_in_db", return_value=False)
+    @patch("app.ingestion.pipeline.VectorStoreIndex")
+    @patch("app.ingestion.pipeline.StorageContext")
+    @patch("app.ingestion.pipeline._get_vector_store")
+    @patch("app.ingestion.pipeline.parse_pdf")
+    @patch("app.ingestion.pipeline.configure_llama_settings")
+    @patch("app.ingestion.pipeline.compute_file_hash", return_value="persist01")
+    def test_pipeline_persists_hash_to_db(
+        self,
+        mock_hash,
+        mock_configure,
+        mock_parse,
+        mock_get_store,
+        mock_storage_ctx,
+        MockIndex,
+        mock_hash_exists,
+        mock_store_hash,
+    ):
+        """run_ingestion_pipeline must persist the file hash in the DB after success."""
+        from app.ingestion.pipeline import run_ingestion_pipeline
+
+        mock_doc = MagicMock()
+        mock_doc.metadata = {}
+        mock_parse.return_value = [mock_doc]
+        mock_get_store.return_value = MagicMock()
+        mock_storage_ctx.from_defaults.return_value = MagicMock()
+        MockIndex.from_documents.return_value = MagicMock()
+
+        run_ingestion_pipeline("/tmp/report.pdf", doc_name="report")
+
+        mock_store_hash.assert_called_once_with("persist01", "report")
+
