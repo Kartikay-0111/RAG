@@ -53,9 +53,8 @@ Thumbs.db
 *.dockerignore
 
 # ── Uploaded PDFs / data ─────────────────────────────────────────────────────
-*.pdf
 data/
 
 # ── LlamaIndex cache ──────────────────────────────────────────────────────────
 .llamaindex/
-storage/
+storage/    

@@ -9,6 +9,7 @@ Handles:
 
 # ── Ensure the project root (ai-doc-rag/) is on sys.path ─────────────────────
 import sys
+import time
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent  # ai-doc-rag/
@@ -17,12 +18,44 @@ if str(_PROJECT_ROOT) not in sys.path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 import streamlit as st
-from app.config import validate_config
+from app.config import validate_config, DEFAULT_PDF_PATH, DEFAULT_PDF_DOC_NAME
 from app.ingestion.pipeline import run_ingestion_pipeline, get_ingested_doc_names
 from app.retrieval.query_engine import get_query_engine
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# ── Retry helper for LLM 429 errors ──────────────────────────────────────────
+
+def _query_with_retry(engine, question: str, max_retries: int = 4):
+    """
+    Run engine.query() with exponential backoff on 429 / RESOURCE_EXHAUSTED.
+
+    Waits 5 → 15 → 30 → 60 seconds between attempts.  Shows a Streamlit
+    warning so the user knows the app is retrying rather than hanging.
+    """
+    delays = [5, 15, 30, 60]
+    for attempt in range(max_retries + 1):
+        try:
+            return engine.query(question)
+        except Exception as exc:
+            err_str = str(exc)
+            is_rate_limit = (
+                "429" in err_str
+                or "RESOURCE_EXHAUSTED" in err_str
+                or "quota" in err_str.lower()
+            )
+            if is_rate_limit and attempt < max_retries:
+                wait = delays[attempt]
+                st.warning(
+                    f"⏳ Gemini rate-limited (attempt {attempt + 1}/{max_retries}). "
+                    f"Retrying in {wait}s…"
+                )
+                time.sleep(wait)
+                st.empty()  # clear the warning before next attempt
+            else:
+                raise  # re-raise if not a rate limit or retries exhausted
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -99,6 +132,29 @@ if st.session_state.documents and not st.session_state.index_ready:
         st.session_state.index_ready = True
     except Exception:
         pass  # will prompt user to upload
+
+# ── Auto-ingest the default Annual Report PDF on first launch ─────────────────
+if not st.session_state.index_ready and Path(DEFAULT_PDF_PATH).exists():
+    try:
+        _default_already = DEFAULT_PDF_DOC_NAME in st.session_state.documents
+        if not _default_already:
+            with st.spinner("📄 Loading default Annual Report — please wait..."):
+                run_ingestion_pipeline(DEFAULT_PDF_PATH, doc_name=DEFAULT_PDF_DOC_NAME)
+                st.session_state.documents.append(DEFAULT_PDF_DOC_NAME)
+        st.session_state.query_engine = get_query_engine()
+        st.session_state.index_ready = True
+        logger.info("Default Annual Report loaded and ready.")
+    except ValueError:
+        # Already ingested (hash matched) — just connect to the index
+        try:
+            if DEFAULT_PDF_DOC_NAME not in st.session_state.documents:
+                st.session_state.documents.append(DEFAULT_PDF_DOC_NAME)
+            st.session_state.query_engine = get_query_engine()
+            st.session_state.index_ready = True
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.error(f"Failed to auto-ingest default PDF: {exc}")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
@@ -185,7 +241,7 @@ st.markdown('<p class="main-header">Document AI Q&A</p>', unsafe_allow_html=True
 st.caption("Ask questions grounded strictly in the uploaded documents. Tables are preserved via LlamaParse.")
 
 if not st.session_state.index_ready:
-    st.info("👈 Upload the PDF and click **Process Document** to begin.")
+    st.info("👈 Upload a PDF and click **Process Document** to begin, or wait for the default Annual Report to load.")
     st.stop()
 
 # ── Chat history ──────────────────────────────────────────────────────────────
@@ -225,7 +281,7 @@ if question := st.chat_input("Ask a question about the uploaded document(s)...")
                 if engine is None:
                     raise RuntimeError("Query engine not initialised. Please process a document first.")
 
-                response = engine.query(question)
+                response = _query_with_retry(engine, question)
 
                 answer = str(response)
                 sources = getattr(response, "source_nodes", [])

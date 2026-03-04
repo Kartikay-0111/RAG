@@ -35,9 +35,13 @@ NEON_DATABASE_URL: str = os.environ.get("NEON_DATABASE_URL", "")
 LLAMA_CLOUD_API_KEY: str = os.environ.get("LLAMA_CLOUD_API_KEY", "")
 
 # ── Gemini model names ────────────────────────────────────────────────────────
-GEMINI_LLM_MODEL: str = "gemini-2.5-flash"
-GEMINI_EMBEDDING_MODEL: str = "models/gemini-embedding-001"
-EMBEDDING_DIMENSION: int = 3072
+GEMINI_LLM_MODEL: str = "gemini-2.0-flash-lite"
+
+# ── Local HuggingFace embedding model ────────────────────────────────────────
+# Runs entirely on CPU/GPU — no API key, no rate limits.
+# Model is downloaded once (~133 MB) to ~/.cache/huggingface/ on first use.
+HF_EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+EMBEDDING_DIMENSION: int = 384
 
 # ── LLM generation settings ───────────────────────────────────────────────────
 LLM_TEMPERATURE: float = 0.1
@@ -48,6 +52,10 @@ TOP_K_CHUNKS: int = 5
 # ── Vector store table name ───────────────────────────────────────────────────
 VECTOR_TABLE_NAME: str = "document_chunks_llama"
 HASH_TABLE_NAME: str = "ingested_document_hashes"
+
+# ── Default document (auto-ingested on first launch) ─────────────────────────
+DEFAULT_PDF_PATH: str = str(Path(__file__).parent.parent / "Annual-Report-FY-2023-24.pdf")
+DEFAULT_PDF_DOC_NAME: str = "Annual-Report-FY-2023-24"
 
 
 # ── Connection helpers ────────────────────────────────────────────────────────

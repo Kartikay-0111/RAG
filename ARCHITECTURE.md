@@ -7,14 +7,14 @@ flowchart TD
     A[User Uploads PDF] --> B["LlamaParse (Cloud PDF → Markdown)"]
     B --> C["_tag_documents (inject document_name metadata)"]
     C --> D["SentenceSplitter (512 tokens / 64 overlap)"]
-    D --> E["Gemini Embedding (gemini-embedding-001, 3072-dim)"]
+    D --> E["HuggingFace BGE-small (BAAI/bge-small-en-v1.5, 384-dim, LOCAL)"]
     E --> F[(Neon PostgreSQL + pgvector)]
 
-    G[User Question] --> H["Gemini Embedding (query)"]
+    G[User Question] --> H["HuggingFace BGE-small (LOCAL embed — no API call)"]
     H --> I["Cosine Similarity Search (Top-5)"]
     F --> I
     I --> J["Strict Grounded Prompt Template"]
-    J --> K["Gemini 2.5 Flash Lite (temp=0.1)"]
+    J --> K["Gemini 2.0 Flash (temp=0.1)"]
     K --> L[Answer + Page Citations + Document Source]
 ```
 
@@ -25,11 +25,23 @@ flowchart TD
 | Layer | Module | Responsibility |
 |-------|--------|----------------|
 | Config | `app/config.py` | Environment variables, URL helpers, file hashing, validation |
-| LLM | `app/llm/__init__.py` | Centralized LlamaIndex Settings (GoogleGenAI LLM + GeminiEmbedding + SentenceSplitter) |
+| LLM | `app/llm/__init__.py` | Centralized LlamaIndex Settings (GoogleGenAI LLM + HuggingFaceEmbedding + SentenceSplitter) |
 | Ingestion | `app/ingestion/pipeline.py` | LlamaParse → metadata tag → chunk → embed → upsert into Neon (with dedup) |
 | Retrieval | `app/retrieval/query_engine.py` | Load index from Neon → QueryEngine with strict grounded prompt |
 | UI | `app/main.py` | Streamlit chat interface with source citation and multi-document support |
 | Logger | `app/utils/logger.py` | Structured logging utility |
+
+---
+
+## Embedding Strategy
+
+Embeddings use **`HuggingFaceEmbedding`** with `BAAI/bge-small-en-v1.5`:
+
+- **Local execution** — runs on CPU (or GPU if CUDA is available)
+- **No API key** — completely free, no rate limits
+- **384-dimensional** vectors stored in pgvector
+- **~133 MB** model, downloaded once to `~/.cache/huggingface/` on first use
+- The **LLM** (Gemini) still uses the Google API, but only once per user query
 
 ---
 
@@ -54,7 +66,7 @@ vector table automatically. No manual DDL required.
 
 ```
 Table: document_chunks_llama
-Columns: id, node_id, text, metadata_ (JSONB), embedding vector(3072)
+Columns: id, node_id, text, metadata_ (JSONB), embedding vector(384)
 Index:   HNSW / IVFFlat on embedding (cosine similarity)
 ```
 

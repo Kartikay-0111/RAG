@@ -10,13 +10,13 @@ Built with **LlamaIndex**, **LlamaParse**, **Gemini**, and **Neon PostgreSQL (pg
 
 ```
 PDF Upload → LlamaParse (Cloud Markdown extraction)
-→ Metadata tagging (document_name injected per chunk)
-→ SentenceSplitter (512 tokens, 64 overlap)
-→ Gemini Embeddings (3072-dim) → Neon pgvector DB
-─────────────────────────────────────────────────────
-User Question → Gemini Embeddings → Cosine Search
-→ Top-5 Chunks → Strict Grounded Prompt
-→ Gemini 2.5 Flash Lite (temp=0.1) → Answer + Page Citations
+           → Metadata tagging (document_name injected per chunk)
+           → SentenceSplitter (512 tokens, 64 overlap)
+           → HuggingFace BGE-small (384-dim, LOCAL — no API calls) → Neon pgvector DB
+─────────────────────────────────────────────────────────────────────────────────────
+User Question → HuggingFace BGE-small (LOCAL embed) → Cosine Search
+             → Top-5 Chunks → Strict Grounded Prompt
+             → Gemini 2.0 Flash (temp=0.1) → Answer + Page Citations
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed component diagram.
@@ -28,11 +28,12 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed component diagram.
 ### Prerequisites
 
 - Python 3.11+
-- A [Google AI Studio](https://aistudio.google.com/app/apikey) API key
+- A [Google AI Studio](https://aistudio.google.com/app/apikey) API key (for the LLM only)
 - A [Neon.tech](https://neon.tech) PostgreSQL database (free tier works)
 - A [LlamaCloud](https://cloud.llamaindex.ai) API key (for LlamaParse)
 
-> **Note:** No local OCR tools needed — LlamaParse handles PDF parsing in the cloud.
+> **Note:** No embedding API key needed — embeddings run locally via HuggingFace.
+> The model (`BAAI/bge-small-en-v1.5`, ~133 MB) is downloaded automatically on first run.
 
 ### 1. Install dependencies
 
@@ -46,12 +47,12 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Fill in all three API keys
+# Fill in GOOGLE_API_KEY, NEON_DATABASE_URL, LLAMA_CLOUD_API_KEY
 ```
 
 | Variable | Source |
 |---|---|
-| `GOOGLE_API_KEY` | [Google AI Studio](https://aistudio.google.com/app/apikey) |
+| `GOOGLE_API_KEY` | [Google AI Studio](https://aistudio.google.com/app/apikey) — LLM only |
 | `NEON_DATABASE_URL` | [Neon.tech](https://neon.tech) — free PostgreSQL + pgvector |
 | `LLAMA_CLOUD_API_KEY` | [LlamaCloud](https://cloud.llamaindex.ai) — for LlamaParse |
 
@@ -65,7 +66,8 @@ Open [http://localhost:8501](http://localhost:8501)
 
 ### 4. Use the App
 
-1. Upload any PDF document in the sidebar
+1. Upload any PDF document in the sidebar 
+   (e.g., [Annual-Report-FY-2023-24.pdf](Annual-Report-FY-2023-24.pdf))
 2. Click **"Process Document"** — LlamaParse extracts tables + text as Markdown
 3. Ask questions — e.g. *"What was the total revenue in FY2024?"*
 4. Upload additional documents — they are added to the same index with metadata tagging
@@ -149,9 +151,9 @@ ai-doc-rag/
 |---|---|
 | PDF Parsing | LlamaParse (cloud) via `llama-index-readers-llama-parse` |
 | Chunking | LlamaIndex SentenceSplitter (512 tokens / 64 overlap) |
-| Embeddings | GeminiEmbedding `gemini-embedding-001` (3072-dim) via `llama-index-embeddings-google` |
+| Embeddings | **HuggingFace `BAAI/bge-small-en-v1.5` (384-dim, LOCAL — no API key)** via `llama-index-embeddings-huggingface` |
 | Vector DB | Neon PostgreSQL + pgvector via `llama-index-vector-stores-postgres` |
-| LLM | GoogleGenAI `gemini-2.5-flash-lite` (temp=0.1) via `llama-index-llms-google-genai` |
+| LLM | GoogleGenAI `gemini-2.0-flash` (temp=0.1) via `llama-index-llms-google-genai` |
 | Framework | LlamaIndex Core |
 | UI | Streamlit |
 | Deployment | Docker |
