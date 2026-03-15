@@ -1,67 +1,92 @@
-# ARCHITECTURE.md — Swiggy Annual Report RAG System
+# ARCHITECTURE.md — Document RAG System (LlamaIndex Edition)
 
 ## System Overview
 
 ```mermaid
 flowchart TD
-    A[User Uploads PDF] --> B["pdf_loader.py (pdf2image @ 300 DPI)"]
-    B --> C["ocr_engine.py (Tesseract OCR per page)"]
-    C --> D["cleaner.py (Whitespace & unicode fix)"]
-    D --> E["chunker.py (500 chars / 100 overlap)"]
-    E --> F["embedder.py (Gemini embedding-001, 768-dim)"]
-    F --> G[(Neon PostgreSQL + pgvector)]
+    A[User Uploads PDF] --> B["LlamaParse (Cloud PDF → Markdown)"]
+    B --> C["_tag_documents (inject document_name metadata)"]
+    C --> D["SentenceSplitter (512 tokens / 64 overlap)"]
+    D --> E["HuggingFace BGE-small (BAAI/bge-small-en-v1.5, 384-dim, LOCAL)"]
+    E --> F[(Neon PostgreSQL + pgvector)]
 
-    H[User Question] --> I["embed_text (RETRIEVAL_QUERY)"]
-    I --> J["similarity_search.py (Cosine distance, Top-5)"]
-    G --> J
-    J --> K["prompt_builder.py (Strict grounded prompt)"]
-    K --> L["gemini_client.py (Gemini 1.5 Flash, temp=0.1)"]
-    L --> M[Answer + Page Citations]
+    G[User Question] --> H["HuggingFace BGE-small (LOCAL embed — no API call)"]
+    H --> I["Cosine Similarity Search (Top-5)"]
+    F --> I
+    I --> J["Strict Grounded Prompt Template"]
+    J --> K["Groq (temp=0.1)"]
+    K --> L[Answer + Page Citations + Document Source]
 ```
 
 ---
 
-## Database Schema
+## Key Components
 
-```sql
-CREATE TABLE document_chunks (
-    id           SERIAL PRIMARY KEY,
-    document_id  TEXT,
-    page_number  INT,
-    chunk_index  INT,
-    content      TEXT,
-    embedding    vector(768),
-    created_at   TIMESTAMP DEFAULT NOW()
-);
-CREATE INDEX ON document_chunks USING ivfflat (embedding vector_cosine_ops)
-WITH (lists = 100);
-```
+| Layer | Module | Responsibility |
+|-------|--------|----------------|
+| Config | `app/config.py` | Environment variables, URL helpers, file hashing, validation |
+| LLM | `app/llm/__init__.py` | Centralized LlamaIndex Settings (GoogleGenAI LLM + HuggingFaceEmbedding + SentenceSplitter) |
+| Ingestion | `app/ingestion/pipeline.py` | LlamaParse → metadata tag → chunk → embed → upsert into Neon (with dedup) |
+| Retrieval | `app/retrieval/query_engine.py` | Load index from Neon → QueryEngine with strict grounded prompt |
+| UI | `app/main.py` | Streamlit chat interface with source citation and multi-document support |
+| Logger | `app/utils/logger.py` | Structured logging utility |
 
 ---
 
-## Similarity Query
+## Embedding Strategy
 
-```sql
-SELECT content, page_number, document_id,
-       (embedding <=> %s::vector) AS score
-FROM document_chunks
-WHERE document_id = %s
-ORDER BY embedding <=> %s::vector
-LIMIT 5;
+Embeddings use **`HuggingFaceEmbedding`** with `BAAI/bge-small-en-v1.5`:
+
+- **Local execution** — runs on CPU (or GPU if CUDA is available)
+- **No API key** — completely free, no rate limits
+- **384-dimensional** vectors stored in pgvector
+- **~133 MB** model, downloaded once to `~/.cache/huggingface/` on first use
+
+---
+
+## Multi-Document Support
+
+All documents are stored in the **same** pgvector table (`document_chunks_llama`).
+Each chunk carries a `document_name` field in its `metadata_` JSONB column, injected
+during ingestion by `_tag_documents()`. This allows:
+
+- Displaying which document a retrieved chunk came from
+- The LLM prompt instructs the model to mention the source document when relevant
+- Future: metadata filtering to scope retrieval to a single document
+
+Duplicate uploads (same SHA-256 hash) are rejected with a `ValueError`.
+
+---
+
+## Database (auto-managed by LlamaIndex PGVectorStore)
+
+The `llama-index-vector-stores-postgres` package creates and manages the
+vector table automatically. No manual DDL required.
+
 ```
+Table: document_chunks_llama
+Columns: id, node_id, text, metadata_ (JSONB), embedding vector(384)
+Index:   HNSW / IVFFlat on embedding (cosine similarity)
+```
+
+`metadata_` stores: `page_label`, `document_name`, and other LlamaParse metadata.
+
+Connection uses **both** sync (psycopg2) and async (asyncpg) drivers
+so LlamaIndex can operate in either mode.
 
 ---
 
 ## Hallucination Mitigation
 
-```
-1. RETRIEVAL: Only chunks from the actual document
-2. PROMPT:    "Answer ONLY using provided context"
-3. REFUSAL:   "Say not available if absent"
-4. CITATION:  "Always cite page numbers"
-5. LLM TEMP:  0.1 (minimal variation)
-6. TOP_P:     0.8 (focused sampling)
-```
+| # | Technique | Detail |
+|---|-----------|--------|
+| 1 | Retrieval scope | Only chunks from ingested documents |
+| 2 | Strict prompt | "Answer ONLY using provided context" |
+| 3 | Refusal | "Say not available if absent" |
+| 4 | Citation | "Always cite page numbers" |
+| 5 | Low temperature | `0.1` |
+| 6 | Table fidelity | LlamaParse preserves Markdown tables — exact numbers used |
+| 7 | Document source | Prompt instructs model to mention document_name when relevant |
 
 ---
 
@@ -72,6 +97,6 @@ LIMIT 5;
 streamlit run app/main.py
 
 # Docker
-docker build -t swiggy-rag .
-docker run -p 8501:8501 --env-file .env swiggy-rag
+docker build -t doc-rag .
+docker run -p 8501:8501 --env-file .env doc-rag
 ```

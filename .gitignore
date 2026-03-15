@@ -28,6 +28,8 @@ ENV/
 .env
 .env.local
 .env.*.local
+.streamlit/secrets.toml
+
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 .pytest_cache/
@@ -52,9 +54,8 @@ Thumbs.db
 *.dockerignore
 
 # ── Uploaded PDFs / data ─────────────────────────────────────────────────────
-*.pdf
 data/
 
 # ── LlamaIndex cache ──────────────────────────────────────────────────────────
 .llamaindex/
-storage/
+storage/    

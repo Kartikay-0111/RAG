@@ -1,105 +1,143 @@
 """
-test_retrieval.py - Unit tests for retrieval modules.
-Neon DB and Gemini API are fully mocked — no external calls.
+test_retrieval.py — Unit tests for the LlamaIndex query engine.
+VectorStoreIndex and Groq are fully mocked — no external API calls.
 """
 
 import pytest
 from unittest.mock import patch, MagicMock
 
-from app.retrieval.similarity_search import search
+
+class TestGetQueryEngine:
+
+    @patch("app.retrieval.query_engine.VectorStoreIndex")
+    @patch("app.retrieval.query_engine.PGVectorStore")
+    @patch("app.retrieval.query_engine.configure_llama_settings")
+    def test_returns_query_engine(self, mock_configure, MockPG, MockIndex):
+        """get_query_engine should return an object (the query engine)."""
+        from app.retrieval.query_engine import get_query_engine
+
+        mock_engine = MagicMock()
+        MockIndex.from_vector_store.return_value.as_query_engine.return_value = mock_engine
+
+        engine = get_query_engine()
+        assert engine is mock_engine
+
+    @patch("app.retrieval.query_engine.VectorStoreIndex")
+    @patch("app.retrieval.query_engine.PGVectorStore")
+    @patch("app.retrieval.query_engine.configure_llama_settings")
+    def test_index_loaded_from_vector_store(self, mock_configure, MockPG, MockIndex):
+        """Must load the index from the existing vector store, not rebuild it."""
+        from app.retrieval.query_engine import get_query_engine
+
+        get_query_engine()
+        MockIndex.from_vector_store.assert_called_once()
+
+    @patch("app.retrieval.query_engine.VectorStoreIndex")
+    @patch("app.retrieval.query_engine.PGVectorStore")
+    @patch("app.retrieval.query_engine.configure_llama_settings")
+    def test_pg_vector_store_from_params_called(self, mock_configure, MockPG, MockIndex):
+        """PGVectorStore.from_params must be called to connect to Neon."""
+        from app.retrieval.query_engine import get_query_engine
+
+        get_query_engine()
+        MockPG.from_params.assert_called_once()
+
+    @patch("app.retrieval.query_engine.VectorStoreIndex")
+    @patch("app.retrieval.query_engine.PGVectorStore")
+    @patch("app.retrieval.query_engine.configure_llama_settings")
+    def test_pg_vector_store_receives_async_connection_string(self, mock_configure, MockPG, MockIndex):
+        """PGVectorStore.from_params must receive async_connection_string."""
+        from app.retrieval.query_engine import get_query_engine
+
+        get_query_engine()
+
+        call_kwargs = MockPG.from_params.call_args.kwargs
+        assert "async_connection_string" in call_kwargs, (
+            "Must supply async_connection_string for asyncpg support."
+        )
+
+    @patch("app.retrieval.query_engine.VectorStoreIndex")
+    @patch("app.retrieval.query_engine.PGVectorStore")
+    @patch("app.retrieval.query_engine.configure_llama_settings")
+    def test_as_query_engine_uses_top_k(self, mock_configure, MockPG, MockIndex):
+        """QueryEngine must be configured with the TOP_K_CHUNKS setting."""
+        from app.retrieval.query_engine import get_query_engine
+        from app.config import TOP_K_CHUNKS
+
+        mock_index = MagicMock()
+        MockIndex.from_vector_store.return_value = mock_index
+
+        get_query_engine()
+
+        call_kwargs = mock_index.as_query_engine.call_args.kwargs
+        assert call_kwargs.get("similarity_top_k") == TOP_K_CHUNKS
+
+    @patch("app.retrieval.query_engine.VectorStoreIndex")
+    @patch("app.retrieval.query_engine.PGVectorStore")
+    @patch("app.retrieval.query_engine.configure_llama_settings")
+    def test_configure_llama_settings_called(self, mock_configure, MockPG, MockIndex):
+        """get_query_engine must call configure_llama_settings."""
+        from app.retrieval.query_engine import get_query_engine
+
+        get_query_engine()
+        mock_configure.assert_called_once()
+
+    @patch("app.retrieval.query_engine.PGVectorStore")
+    @patch("app.retrieval.query_engine.configure_llama_settings")
+    def test_raises_runtime_error_on_failure(self, mock_configure, MockPG):
+        """get_query_engine must raise RuntimeError if connection fails."""
+        from app.retrieval.query_engine import get_query_engine
+
+        MockPG.from_params.side_effect = Exception("Connection refused")
+
+        with pytest.raises(RuntimeError, match="Query engine initialisation failed"):
+            get_query_engine()
 
 
-class TestSimilaritySearch:
-
-    @patch("app.retrieval.similarity_search.psycopg2.connect")
-    @patch("app.retrieval.similarity_search.embed_text")
-    def test_returns_list_of_dicts(self, mock_embed, mock_connect):
-        mock_embed.return_value = [0.1] * 768
-        mock_cursor = MagicMock()
-        mock_cursor.__enter__ = lambda s: s
-        mock_cursor.__exit__ = MagicMock(return_value=False)
-        mock_cursor.fetchall.return_value = [
-            ("Some content text here", 5, "doc123", 0.12),
-            ("More financial data", 10, "doc123", 0.25),
-        ]
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-        mock_connect.return_value = mock_conn
-
-        results = search("What is revenue?", document_id="doc123", top_k=5)
-        assert isinstance(results, list)
-        assert len(results) == 2
-        assert "content" in results[0]
-        assert "page_number" in results[0]
-        assert "score" in results[0]
-
-    @patch("app.retrieval.similarity_search.psycopg2.connect")
-    @patch("app.retrieval.similarity_search.embed_text")
-    def test_query_embedding_uses_retrieval_query_task(self, mock_embed, mock_connect):
-        mock_embed.return_value = [0.0] * 768
-        mock_cursor = MagicMock()
-        mock_cursor.__enter__ = lambda s: s
-        mock_cursor.__exit__ = MagicMock(return_value=False)
-        mock_cursor.fetchall.return_value = []
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-        mock_connect.return_value = mock_conn
-
-        search("test query")
-        mock_embed.assert_called_once_with("test query", task_type="RETRIEVAL_QUERY")
-
-    @patch("app.retrieval.similarity_search.psycopg2.connect")
-    @patch("app.retrieval.similarity_search.embed_text")
-    def test_empty_results_returns_empty_list(self, mock_embed, mock_connect):
-        mock_embed.return_value = [0.0] * 768
-        mock_cursor = MagicMock()
-        mock_cursor.__enter__ = lambda s: s
-        mock_cursor.__exit__ = MagicMock(return_value=False)
-        mock_cursor.fetchall.return_value = []
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-        mock_connect.return_value = mock_conn
-
-        results = search("nonexistent topic")
-        assert results == []
-
-
-from app.retrieval.prompt_builder import build_prompt
-
-
-class TestPromptBuilder:
-
-    def test_prompt_contains_question(self):
-        question = "What is Swiggy's net profit?"
-        prompt = build_prompt(question, [])
-        assert question in prompt
+class TestQaPromptTemplate:
 
     def test_prompt_contains_strict_rules(self):
-        prompt = build_prompt("test?", [])
-        assert "not available in the document" in prompt
-        assert "Do NOT" in prompt
+        """The QA prompt must contain hallucination prevention rules."""
+        from app.retrieval.query_engine import _QA_PROMPT_TEMPLATE
 
-    def test_prompt_contains_context_with_page_numbers(self):
-        chunks = [
-            {"content": "Revenue was ₹12,000 crores.", "page_number": 42},
-            {"content": "EBITDA increased by 15%.", "page_number": 55},
-        ]
-        prompt = build_prompt("What is revenue?", chunks)
-        assert "Page 42" in prompt
-        assert "Page 55" in prompt
-        assert "₹12,000 crores" in prompt
+        template_str = _QA_PROMPT_TEMPLATE.template
+        assert "ONLY" in template_str
+        assert "not available in the provided document" in template_str
 
-    def test_empty_context_handled_gracefully(self):
-        prompt = build_prompt("Any question?", [])
-        assert "No relevant context found" in prompt
+    def test_prompt_contains_context_and_query_vars(self):
+        """The QA prompt must reference {context_str} and {query_str}."""
+        from app.retrieval.query_engine import _QA_PROMPT_TEMPLATE
 
-    def test_multiple_excerpts_are_numbered(self):
-        chunks = [
-            {"content": "Text A", "page_number": 1},
-            {"content": "Text B", "page_number": 2},
-            {"content": "Text C", "page_number": 3},
-        ]
-        prompt = build_prompt("question", chunks)
-        assert "Excerpt 1" in prompt
-        assert "Excerpt 2" in prompt
-        assert "Excerpt 3" in prompt
+        template_str = _QA_PROMPT_TEMPLATE.template
+        assert "{context_str}" in template_str
+        assert "{query_str}" in template_str
+
+    def test_prompt_instructs_table_reading(self):
+        """The QA prompt must specifically instruct on reading Markdown tables."""
+        from app.retrieval.query_engine import _QA_PROMPT_TEMPLATE
+
+        template_str = _QA_PROMPT_TEMPLATE.template
+        assert "Markdown" in template_str or "tables" in template_str.lower()
+
+    def test_prompt_requires_page_citations(self):
+        """The QA prompt must require page number citations."""
+        from app.retrieval.query_engine import _QA_PROMPT_TEMPLATE
+
+        template_str = _QA_PROMPT_TEMPLATE.template
+        assert "Page" in template_str
+        assert "citation" in template_str.lower() or "cite" in template_str.lower()
+
+    def test_prompt_mentions_document_name_metadata(self):
+        """The QA prompt should instruct the LLM to use document_name metadata."""
+        from app.retrieval.query_engine import _QA_PROMPT_TEMPLATE
+
+        template_str = _QA_PROMPT_TEMPLATE.template
+        assert "document_name" in template_str
+
+    def test_prompt_is_generic_not_hardcoded(self):
+        """The QA prompt must NOT contain hardcoded document names."""
+        from app.retrieval.query_engine import _QA_PROMPT_TEMPLATE
+
+        template_str = _QA_PROMPT_TEMPLATE.template
+        assert "Swiggy" not in template_str
+        assert "swiggy" not in template_str.lower()

@@ -1,15 +1,15 @@
 """
-main.py - Streamlit entry point for the Swiggy Annual Report RAG system.
+main.py — Streamlit UI for the Document RAG System (LlamaIndex edition).
 
-UI Layout:
-- Sidebar: PDF upload + "Process Document" button
-- Main area: Q&A chat interface with answer + expandable context
+Handles:
+  - PDF upload → triggers LlamaParse ingestion pipeline
+  - Multi-document support (same vector table, metadata-tagged)
+  - Chat interface → calls QueryEngine for grounded answers
 """
 
 # ── Ensure the project root (ai-doc-rag/) is on sys.path ─────────────────────
-# This is required because Streamlit runs this file directly (not as a module),
-# so relative imports like `from app.config import ...` need the root in path.
 import sys
+import time
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent  # ai-doc-rag/
@@ -17,295 +17,269 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 # ─────────────────────────────────────────────────────────────────────────────
 
-import os
-import hashlib
-import tempfile
-
 import streamlit as st
-
-from app.config import validate_config
+from app.config import validate_config, DEFAULT_PDF_PATH, DEFAULT_PDF_DOC_NAME
+from app.ingestion.pipeline import run_ingestion_pipeline, get_ingested_doc_names
+from app.retrieval.query_engine import get_query_engine
 from app.utils.logger import get_logger
-from app.ingestion.pdf_loader import load_pdf_as_images
-from app.ingestion.ocr_engine import run_ocr
-from app.ingestion.cleaner import clean_pages
-from app.ingestion.chunker import chunk_pages
-from app.ingestion.embedder import embed_chunks
-from app.retrieval.vector_store import init_schema, clear_document, upsert_chunks
-from app.retrieval.similarity_search import search
-from app.retrieval.prompt_builder import build_prompt
-from app.llm.gemini_client import generate_answer
 
 logger = get_logger(__name__)
 
 # ── Page config ───────────────────────────────────────────────────────────────
+
 st.set_page_config(
-    page_title="Swiggy RAG · Document Intelligence",
-    page_icon="🍊",
+    page_title="Document AI Q&A",
+    page_icon="📄",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ─────────────────────────────────────────────────────────────────
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
-}
-
-/* Main background */
-.stApp {
-    background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
-    color: #e2e8f0;
-}
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-    background: rgba(255,255,255,0.04);
-    border-right: 1px solid rgba(255,165,0,0.2);
-}
-
-/* Header */
-.hero-header {
-    background: linear-gradient(135deg, #ff6b00, #ff9500);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    font-size: 2.4rem;
-    font-weight: 700;
-    margin-bottom: 0.2rem;
-}
-
-/* Answer card */
-.answer-card {
-    background: rgba(255, 107, 0, 0.08);
-    border: 1px solid rgba(255, 107, 0, 0.3);
-    border-radius: 12px;
-    padding: 1.4rem 1.8rem;
-    margin-top: 1rem;
-    color: #f0f4ff;
-    line-height: 1.7;
-}
-
-/* Context card */
-.context-card {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 8px;
-    padding: 1rem 1.2rem;
-    margin-bottom: 0.8rem;
-    font-size: 0.875rem;
-    color: #94a3b8;
-}
-
-/* Page badge */
-.page-badge {
-    display: inline-block;
-    background: rgba(255, 107, 0, 0.25);
-    color: #ff9500;
-    border-radius: 20px;
-    padding: 2px 10px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    margin-bottom: 0.5rem;
-}
-
-/* Chat input */
-.stTextInput > div > div > input {
-    background: rgba(255,255,255,0.05) !important;
-    border: 1px solid rgba(255,107,0,0.4) !important;
-    border-radius: 8px !important;
-    color: #e2e8f0 !important;
-}
-
-/* Buttons */
-.stButton > button {
-    background: linear-gradient(135deg, #ff6b00, #ff9500) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 8px !important;
-    font-weight: 600 !important;
-    transition: opacity 0.2s !important;
-}
-.stButton > button:hover { opacity: 0.88 !important; }
-
-/* Divider */
-hr { border-color: rgba(255,107,0,0.2) !important; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    .stApp { background-color: #0f0f0f; color: #e8e8e8; }
+    .main-header {
+        background: linear-gradient(135deg, #4A90D9 0%, #67B8F7 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 2.5rem;
+        font-weight: 700;
+    }
+    .context-box {
+        background: #1e1e1e;
+        border-left: 3px solid #4A90D9;
+        padding: 0.8rem 1rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        color: #aaa;
+        margin-bottom: 0.5rem;
+    }
+    .badge {
+        display: inline-block;
+        background: #4A90D9;
+        color: white;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.75rem;
+        margin-bottom: 0.4rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Validate config on startup ─────────────────────────────────────────────
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+try:
+    validate_config()
+except EnvironmentError as e:
+    st.error(f"⚠️ Configuration Error:\n\n{e}")
+    st.stop()
 
-def _document_id_from_file(name: str) -> str:
-    """Generate a stable document_id from the filename."""
-    return hashlib.md5(name.encode()).hexdigest()[:12]
+# ── Session state ─────────────────────────────────────────────────────────────
 
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "index_ready" not in st.session_state:
+    st.session_state.index_ready = False
+if "query_engine" not in st.session_state:
+    st.session_state.query_engine = None
+if "documents" not in st.session_state:
+    # Restore previously-ingested doc names from the DB on first load
+    try:
+        st.session_state.documents = get_ingested_doc_names()
+    except Exception:
+        st.session_state.documents = []
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0  # bump to reset file_uploader widget
 
-def _run_ingestion_pipeline(pdf_path: str, document_id: str) -> int:
-    """
-    Full ingestion: PDF → OCR → clean → chunk → embed → store.
-    Returns number of chunks stored.
-    """
-    prog = st.progress(0, text="📄 Loading PDF pages...")
+# Auto-connect to existing index if documents already exist in DB
+if st.session_state.documents and not st.session_state.index_ready:
+    try:
+        st.session_state.query_engine = get_query_engine()
+        st.session_state.index_ready = True
+    except Exception:
+        pass  # will prompt user to upload
 
-    pages_images = load_pdf_as_images(pdf_path)
-    prog.progress(15, text=f"🔍 Running OCR on {len(pages_images)} pages...")
-
-    raw_pages = run_ocr(pages_images)
-    prog.progress(40, text="🧹 Cleaning text...")
-
-    clean = clean_pages(raw_pages)
-    prog.progress(55, text="✂️ Chunking text...")
-
-    chunks = chunk_pages(clean, document_id=document_id)
-    prog.progress(65, text=f"🧠 Embedding {len(chunks)} chunks via Gemini...")
-
-    embedded = embed_chunks(chunks)
-    prog.progress(85, text="💾 Storing embeddings in Neon...")
-
-    clear_document(document_id)
-    count = upsert_chunks(embedded)
-
-    prog.progress(100, text=f"✅ Done! {count} chunks stored.")
-    return count
-
+# ── Auto-ingest the default Annual Report PDF on first launch ─────────────────
+if not st.session_state.index_ready and Path(DEFAULT_PDF_PATH).exists():
+    try:
+        _default_already = DEFAULT_PDF_DOC_NAME in st.session_state.documents
+        if not _default_already:
+            with st.spinner("📄 Loading default Annual Report — please wait..."):
+                run_ingestion_pipeline(DEFAULT_PDF_PATH, doc_name=DEFAULT_PDF_DOC_NAME)
+                st.session_state.documents.append(DEFAULT_PDF_DOC_NAME)
+        st.session_state.query_engine = get_query_engine()
+        st.session_state.index_ready = True
+        logger.info("Default Annual Report loaded and ready.")
+    except ValueError:
+        # Already ingested (hash matched) — just connect to the index
+        try:
+            if DEFAULT_PDF_DOC_NAME not in st.session_state.documents:
+                st.session_state.documents.append(DEFAULT_PDF_DOC_NAME)
+            st.session_state.query_engine = get_query_engine()
+            st.session_state.index_ready = True
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.error(f"Failed to auto-ingest default PDF: {exc}")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.markdown("## 🍊 Swiggy RAG")
-    st.markdown("**Document Intelligence System**")
+    st.markdown("### 📄 Document RAG")
+    st.caption("Powered by LlamaIndex + LlamaParse + Groq + Neon pgvector")
     st.divider()
 
-    st.markdown("### 📂 Upload Document")
     uploaded_file = st.file_uploader(
-        "Upload the Swiggy Annual Report PDF",
+        "Upload a PDF document",
         type=["pdf"],
-        help="Upload a PDF to process and index.",
+        help="LlamaParse will extract tables and text as Markdown.",
+        key=f"pdf_uploader_{st.session_state.uploader_key}",
     )
 
-    process_btn = st.button(
-        "⚙️ Process Document",
-        disabled=(uploaded_file is None),
-        use_container_width=True,
-    )
+    if uploaded_file:
+        if st.button("⚙️ Process Document", use_container_width=True):
+            # Save uploaded PDF to a temp file
+            tmp_path = Path("/tmp") / uploaded_file.name
+            tmp_path.write_bytes(uploaded_file.getvalue())
+            doc_name = tmp_path.stem
+
+            with st.spinner("🔍 Parsing PDF with LlamaParse..."):
+                try:
+                    progress = st.progress(0, text="Starting LlamaParse...")
+                    progress.progress(10, text="Parsing PDF to Markdown...")
+
+                    index = run_ingestion_pipeline(tmp_path, doc_name=doc_name)
+                    progress.progress(70, text="Storing embeddings in Neon...")
+
+                    st.session_state.query_engine = get_query_engine()
+                    st.session_state.index_ready = True
+                    if doc_name not in st.session_state.documents:
+                        st.session_state.documents.append(doc_name)
+                    progress.progress(100, text="Done!")
+                    st.success(f"✅ '{doc_name}' processed! Ask your questions below.")
+                    logger.info(f"Document '{uploaded_file.name}' ingested successfully.")
+
+                except ValueError as ve:
+                    # Duplicate document
+                    st.warning(f"⚠️ {ve}")
+                    # Still allow querying the existing index
+                    try:
+                        st.session_state.query_engine = get_query_engine()
+                        st.session_state.index_ready = True
+                        st.info("Using previously ingested index.")
+                    except Exception:
+                        st.error("Could not connect to existing index.")
+                    logger.warning(f"Duplicate upload: {ve}")
+
+                except Exception as e:
+                    st.error(f"❌ Ingestion failed: {e}")
+                    logger.error(f"Ingestion error: {e}")
+
+    # ── Ingested documents list ───────────────────────────────────────────────
+    if st.session_state.index_ready:
+        st.success("✅ Index ready")
+    if st.session_state.documents:
+        st.caption(f"📚 Ingested: {', '.join(st.session_state.documents)}")
 
     st.divider()
-    st.markdown("""
-    **How it works:**
-    1. Upload the PDF
-    2. Click "Process Document" (takes a few minutes)
-    3. Ask questions in the chat below
 
-    ---
-    **Stack:**  
-    🔎 Tesseract OCR  
-    🧠 Gemini Embeddings  
-    🗄️ Neon + pgvector  
-    🤖 Gemini 1.5 Flash  
-    """)
+    # ── Clear / Reset buttons ─────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🗑️ Clear Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+    with col2:
+        if st.button("🔄 Reset All", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.index_ready = False
+            st.session_state.query_engine = None
+            st.session_state.documents = []
+            st.session_state.uploader_key += 1  # reset file uploader
+            st.rerun()
 
+    st.divider()
+    st.caption("llama-index-core · LlamaParse · Groq · Neon pgvector")
 
-# ── Main area ─────────────────────────────────────────────────────────────────
+# ── Main content ──────────────────────────────────────────────────────────────
 
-st.markdown('<p class="hero-header">🍊 Swiggy Annual Report · AI Q&A</p>', unsafe_allow_html=True)
-st.markdown("Ask any question about Swiggy's annual report. Answers are **strictly grounded** in the document — no hallucinations.")
-st.divider()
+st.markdown('<p class="main-header">Document AI Q&A</p>', unsafe_allow_html=True)
+st.caption("Ask questions grounded strictly in the uploaded documents. Tables are preserved via LlamaParse.")
 
-# ── Validate env on first load ────────────────────────────────────────────────
-try:
-    validate_config()
-except EnvironmentError as e:
-    st.error(f"⚠️ Configuration Error: {e}")
+if not st.session_state.index_ready:
+    st.info("👈 Upload a PDF and click **Process Document** to begin, or wait for the default Annual Report to load.")
     st.stop()
 
-# ── Initialise DB schema (idempotent) ─────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
-def _init_db():
-    init_schema()
+# ── Chat history ──────────────────────────────────────────────────────────────
 
-_init_db()
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("sources"):
+            with st.expander("📄 View source chunks"):
+                for i, node in enumerate(msg["sources"], 1):
+                    score = getattr(node, "score", None)
+                    page = node.metadata.get("page_label", "?")
+                    doc = node.metadata.get("document_name", "")
+                    label_parts = [f"Excerpt {i}", f"Page {page}"]
+                    if doc:
+                        label_parts.append(doc)
+                    if score is not None:
+                        label_parts.append(f"Score {score:.3f}")
+                    st.markdown(
+                        f'<div class="context-box">'
+                        f'<span class="badge">{" · ".join(label_parts)}'
+                        f"</span><br>{node.text[:400]}...</div>",
+                        unsafe_allow_html=True,
+                    )
 
-# ── Handle ingestion ──────────────────────────────────────────────────────────
-if process_btn and uploaded_file is not None:
-    doc_id = _document_id_from_file(uploaded_file.name)
-    st.session_state["document_id"] = doc_id
-    st.session_state["document_name"] = uploaded_file.name
+# ── Chat input ────────────────────────────────────────────────────────────────
 
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        tmp.write(uploaded_file.read())
-        tmp_path = tmp.name
+if question := st.chat_input("Ask a question about the uploaded document(s)..."):
+    st.session_state.messages.append({"role": "user", "content": question})
+    with st.chat_message("user"):
+        st.markdown(question)
 
-    with st.spinner("Processing document — this may take several minutes for large PDFs..."):
-        try:
-            count = _run_ingestion_pipeline(tmp_path, doc_id)
-            st.success(f"✅ **{uploaded_file.name}** processed successfully! **{count}** chunks indexed.")
-        except Exception as exc:
-            st.error(f"❌ Ingestion failed: {exc}")
-            logger.error(f"Ingestion error: {exc}", exc_info=True)
-        finally:
-            os.unlink(tmp_path)
+    with st.chat_message("assistant"):
+        with st.spinner("Searching document..."):
+            try:
+                engine = st.session_state.query_engine
+                if engine is None:
+                    raise RuntimeError("Query engine not initialised. Please process a document first.")
 
-# ── Q&A Interface ─────────────────────────────────────────────────────────────
-doc_id = st.session_state.get("document_id")
-doc_name = st.session_state.get("document_name", "No document loaded")
+                response = engine.query(question)
 
-if doc_id:
-    st.markdown(f"**📄 Active Document:** `{doc_name}`")
-else:
-    st.info("⬅️ Upload and process a PDF from the sidebar to start asking questions.")
+                answer = str(response)
+                sources = getattr(response, "source_nodes", [])
 
-st.markdown("### 💬 Ask a Question")
-query = st.text_input(
-    label="Your question",
-    placeholder="e.g. What was Swiggy's total revenue in FY2024?",
-    label_visibility="collapsed",
-)
+                st.markdown(answer)
 
-ask_btn = st.button("🔍 Ask", disabled=(not query or not doc_id), use_container_width=False)
+                if sources:
+                    with st.expander(f"📄 View {len(sources)} source chunks"):
+                        for i, node in enumerate(sources, 1):
+                            score = getattr(node, "score", None)
+                            page = node.metadata.get("page_label", "?")
+                            doc = node.metadata.get("document_name", "")
+                            label_parts = [f"Excerpt {i}", f"Page {page}"]
+                            if doc:
+                                label_parts.append(doc)
+                            if score is not None:
+                                label_parts.append(f"Score {score:.3f}")
+                            st.markdown(
+                                f'<div class="context-box">'
+                                f'<span class="badge">{" · ".join(label_parts)}'
+                                f"</span><br>{node.text[:400]}...</div>",
+                                unsafe_allow_html=True,
+                            )
 
-if ask_btn and query and doc_id:
-    with st.spinner("Searching document and generating answer..."):
-        try:
-            # Retrieve relevant chunks
-            chunks = search(query=query, document_id=doc_id)
-
-            # Build grounded prompt
-            prompt = build_prompt(query=query, context_chunks=chunks)
-
-            # Generate answer
-            answer = generate_answer(prompt)
-
-            # ── Display answer ──
-            st.markdown("#### 📝 Answer")
-            st.markdown(f'<div class="answer-card">{answer}</div>', unsafe_allow_html=True)
-
-            # ── Display supporting context ──
-            if chunks:
-                with st.expander("📚 Supporting Context (from document)", expanded=False):
-                    for i, chunk in enumerate(chunks, start=1):
-                        st.markdown(
-                            f'<div class="context-card">'
-                            f'<span class="page-badge">Page {chunk["page_number"]}</span><br>'
-                            f'{chunk["content"]}'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-            else:
-                st.warning("No relevant context found in the document for this query.")
-
-        except Exception as exc:
-            st.error(f"❌ Error generating answer: {exc}")
-            logger.error(f"Q&A error: {exc}", exc_info=True)
-
-# ── Footer ─────────────────────────────────────────────────────────────────────
-st.divider()
-st.markdown(
-    "<p style='text-align:center;color:#475569;font-size:0.8rem;'>"
-    "Swiggy Annual Report RAG · Powered by Gemini + Neon pgvector · "
-    "Answers grounded strictly in document context"
-    "</p>",
-    unsafe_allow_html=True,
-)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer,
+                    "sources": sources,
+                })
+            except Exception as e:
+                err = f"Query failed: {e}"
+                st.error(err)
+                logger.error(err)
