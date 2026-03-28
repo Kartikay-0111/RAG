@@ -1,5 +1,7 @@
 # 📄 Document AI Q&A — RAG System
 
+[![gitcgr](https://gitcgr.com/badge/Kartikay-0111/RAG.svg)](https://gitcgr.com/Kartikay-0111/RAG)
+
 A **Retrieval-Augmented Generation (RAG)** system that answers natural language questions about uploaded PDF documents, strictly grounded in document content. No hallucinations.
 
 Built with **LlamaIndex**, **LlamaParse**, **Groq**, and **Neon PostgreSQL (pgvector)**.
